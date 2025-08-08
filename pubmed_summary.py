@@ -440,7 +440,7 @@ def main():
     
     # 1. PubMedから新着論文を取得（履歴フィルタリング付き）
     fetcher = PubMedFetcher(JOURNAL_NAMES, history_manager)
-    pmid_list = fetcher.search_articles(days_back=7)
+    pmid_list = fetcher.search_articles(days_back=2)
     
     if not pmid_list:
         print("新規論文はありません（すべて送信済みまたは新着なし）")
