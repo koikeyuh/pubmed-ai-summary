@@ -8,6 +8,8 @@ from email.mime.multipart import MIMEMultipart
 from typing import List, Dict
 import google.generativeai as genai
 import time
+import xml.etree.ElementTree as ET
+import re
 
 class PubMedFetcher:
     """PubMed APIを使用して論文を取得"""
@@ -25,10 +27,13 @@ class PubMedFetcher:
         journal_query = " OR ".join([f'"{journal}"[Journal]' for journal in self.journal_names])
         query = f"({journal_query}) AND {date_from}:{date_to}[PDAT]"
         
+        print(f"検索クエリ: {query}")
+        print(f"検索期間: {date_from} から {date_to}")
+        
         params = {
             "db": "pubmed",
             "term": query,
-            "retmax": 20,  # 最大20件
+            "retmax": 100,  # 最大100件に増やす
             "retmode": "json",
             "sort": "pub_date"
         }
@@ -36,85 +41,156 @@ class PubMedFetcher:
         response = requests.get(f"{self.base_url}esearch.fcgi", params=params)
         data = response.json()
         
-        return data.get("esearchresult", {}).get("idlist", [])
+        pmid_list = data.get("esearchresult", {}).get("idlist", [])
+        print(f"見つかった論文数: {len(pmid_list)}件")
+        print(f"PMID リスト: {pmid_list[:10]}...")  # 最初の10件を表示
+        
+        return pmid_list
     
     def fetch_article_details(self, pmid_list: List[str]) -> List[Dict]:
         """論文の詳細情報を取得"""
         if not pmid_list:
             return []
         
-        params = {
-            "db": "pubmed",
-            "id": ",".join(pmid_list),
-            "retmode": "xml"
-        }
-        
-        response = requests.get(f"{self.base_url}efetch.fcgi", params=params)
-        
-        # XMLパースの代わりに簡易的なテキスト処理
         articles = []
-        content = response.text
         
-        for pmid in pmid_list:
-            article = self._parse_article(content, pmid)
-            if article:
-                articles.append(article)
+        # PMIDを一度に最大20件ずつ処理
+        batch_size = 20
+        for i in range(0, len(pmid_list), batch_size):
+            batch = pmid_list[i:i+batch_size]
+            print(f"バッチ {i//batch_size + 1}: {len(batch)}件の論文を取得中...")
+            
+            params = {
+                "db": "pubmed",
+                "id": ",".join(batch),
+                "retmode": "xml"
+            }
+            
+            response = requests.get(f"{self.base_url}efetch.fcgi", params=params)
+            
+            # XMLパース
+            try:
+                root = ET.fromstring(response.content)
+                
+                # 各PubmedArticleを処理
+                for article_elem in root.findall('.//PubmedArticle'):
+                    article_data = self._parse_article_element(article_elem)
+                    if article_data:
+                        articles.append(article_data)
+                        print(f"  論文取得: {article_data['title'][:50]}...")
+                        
+            except ET.ParseError as e:
+                print(f"XMLパースエラー: {e}")
+                continue
+            
+            # API制限対策
+            if i + batch_size < len(pmid_list):
+                time.sleep(0.5)
         
-        return articles
+        # 重複を除去（PMIDでユニーク化）
+        unique_articles = {}
+        for article in articles:
+            if article['pmid'] not in unique_articles:
+                unique_articles[article['pmid']] = article
+        
+        final_articles = list(unique_articles.values())
+        print(f"最終的な論文数: {len(final_articles)}件（重複除去後）")
+        
+        return final_articles
     
-    def _parse_article(self, xml_content: str, pmid: str) -> Dict:
-        """XMLから論文情報を抽出（簡易版）"""
-        import re
-        
-        # PMID周辺の情報を抽出
-        pattern = f'<PubmedArticle>.*?<PMID.*?>{pmid}</PMID>.*?</PubmedArticle>'
-        match = re.search(pattern, xml_content, re.DOTALL)
-        
-        if not match:
+    def _parse_article_element(self, article_elem) -> Dict:
+        """XML要素から論文情報を抽出"""
+        try:
+            # PMID取得
+            pmid_elem = article_elem.find('.//PMID')
+            if pmid_elem is None:
+                return None
+            pmid = pmid_elem.text
+            
+            # タイトル取得
+            title_elem = article_elem.find('.//ArticleTitle')
+            title = title_elem.text if title_elem is not None else "タイトルなし"
+            
+            # アブストラクト取得
+            abstract_texts = []
+            abstract_elems = article_elem.findall('.//AbstractText')
+            for abs_elem in abstract_elems:
+                if abs_elem.text:
+                    abstract_texts.append(abs_elem.text)
+                # Labelがある場合（構造化アブストラクト）
+                if 'Label' in abs_elem.attrib:
+                    label = abs_elem.attrib['Label']
+                    text = abs_elem.text or ""
+                    abstract_texts.append(f"{label}: {text}")
+            abstract = " ".join(abstract_texts)
+            
+            # 雑誌名取得
+            journal_elem = article_elem.find('.//Journal/Title')
+            journal = journal_elem.text if journal_elem is not None else "雑誌名不明"
+            
+            # 著者名取得（最大3名）
+            authors = []
+            author_elems = article_elem.findall('.//Author')
+            for author_elem in author_elems[:3]:
+                lastname = author_elem.find('LastName')
+                forename = author_elem.find('ForeName')
+                if lastname is not None and forename is not None:
+                    authors.append(f"{forename.text} {lastname.text}")
+            
+            if len(author_elems) > 3:
+                authors.append("et al.")
+            author_str = ", ".join(authors) if authors else "著者不明"
+            
+            # 発行日取得
+            pub_date = self._extract_pub_date(article_elem)
+            
+            # DOI取得
+            doi = ""
+            for id_elem in article_elem.findall('.//ArticleId'):
+                if id_elem.get('IdType') == 'doi':
+                    doi = id_elem.text
+                    break
+            
+            return {
+                "pmid": pmid,
+                "title": title,
+                "abstract": abstract,
+                "authors": author_str,
+                "journal": journal,
+                "pub_date": pub_date,
+                "doi": doi,
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            }
+            
+        except Exception as e:
+            print(f"論文パースエラー: {e}")
             return None
-        
-        article_xml = match.group()
-        
-        # 各フィールドを抽出
-        title = self._extract_field(article_xml, "ArticleTitle")
-        abstract = self._extract_field(article_xml, "AbstractText")
-        journal = self._extract_field(article_xml, "Title")  # Journal Title
-        
-        # 著者名を抽出
-        authors = re.findall(r'<LastName>(.*?)</LastName>.*?<ForeName>(.*?)</ForeName>', 
-                           article_xml, re.DOTALL)
-        author_names = [f"{fn} {ln}" for ln, fn in authors[:3]]  # 最初の3名
-        
-        # 発行日を抽出
-        year = self._extract_field(article_xml, "Year") or "2024"
-        month = self._extract_field(article_xml, "Month") or "01"
-        day = self._extract_field(article_xml, "Day") or "01"
-        
-        # DOIを抽出
-        doi_match = re.search(r'<ArticleId IdType="doi">(.*?)</ArticleId>', article_xml)
-        doi = doi_match.group(1) if doi_match else ""
-        
-        return {
-            "pmid": pmid,
-            "title": title,
-            "abstract": abstract,
-            "authors": ", ".join(author_names) + (" et al." if len(authors) > 3 else ""),
-            "journal": journal,
-            "pub_date": f"{year}/{month}/{day}",
-            "doi": doi,
-            "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-        }
     
-    def _extract_field(self, xml: str, tag: str) -> str:
-        """XMLからフィールドを抽出"""
-        import re
-        pattern = f'<{tag}.*?>(.*?)</{tag}>'
-        match = re.search(pattern, xml, re.DOTALL)
-        if match:
-            # HTMLタグを除去
-            text = re.sub(r'<[^>]+>', '', match.group(1))
-            return text.strip()
-        return ""
+    def _extract_pub_date(self, article_elem) -> str:
+        """発行日を抽出"""
+        # PubDateを優先的に使用
+        pubdate = article_elem.find('.//PubDate')
+        if pubdate is not None:
+            year = pubdate.find('Year')
+            month = pubdate.find('Month')
+            day = pubdate.find('Day')
+            
+            year_str = year.text if year is not None else "2024"
+            month_str = month.text if month is not None else "01"
+            day_str = day.text if day is not None else "01"
+            
+            # 月名を数字に変換
+            month_map = {
+                'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
+                'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
+                'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
+            }
+            if month_str in month_map:
+                month_str = month_map[month_str]
+            
+            return f"{year_str}/{month_str}/{day_str}"
+        
+        return "日付不明"
 
 class AIReporter:
     """Google Gemini APIを使用してAI要約を生成"""
@@ -125,18 +201,24 @@ class AIReporter:
     
     def summarize_abstract(self, abstract: str, title: str) -> List[str]:
         """アブストラクトを日本語で要約"""
-        if not abstract:
-            return ["要約対象のアブストラクトがありません"]
+        if not abstract or len(abstract) < 50:
+            return [
+                "・要約対象のアブストラクトが不十分です",
+                "・原文をご確認ください",
+                "・詳細情報は論文本文を参照",
+                "・PubMedリンクから全文アクセス可能"
+            ]
         
         prompt = f"""
-        以下の医学論文のアブストラクトを読んで、放射線腫瘍学の専門家向けに、重要なポイントを日本語で4つの箇条書きで日本語に要約してください。
+        以下の医学論文のアブストラクトを読んで、最も重要なポイントを日本語で4点に要約してください。
+        各ポイントは簡潔に、専門用語は適切に日本語訳してください。
         
         論文タイトル: {title}
         
         アブストラクト:
-        {abstract}
+        {abstract[:3000]}  # 文字数制限
         
-        出力形式:
+        出力形式（必ず以下の形式で4点出力）:
         ・[ポイント1]
         ・[ポイント2]
         ・[ポイント3]
@@ -153,9 +235,12 @@ class AIReporter:
                 return points[:4]
             else:
                 # 不足分を補完
-                return points + ["詳細はアブストラクトを参照してください"] * (4 - len(points))
+                while len(points) < 4:
+                    points.append("・詳細はアブストラクトを参照してください")
+                return points[:4]
+                
         except Exception as e:
-            print(f"要約エラー: {e}")
+            print(f"要約エラー ({title[:30]}...): {e}")
             return [
                 "・AIによる要約生成に失敗しました",
                 "・原文をご確認ください",
@@ -172,15 +257,22 @@ class EmailSender:
     
     def send_summary(self, to_email: str, articles: List[Dict], field_name: str = "放射線腫瘍学"):
         """要約メールを送信"""
-        subject = f"【PubMed新着論文】{field_name} - {datetime.now().strftime('%Y年%m月%d日')}"
+        # 日本時間で表示
+        from datetime import timezone, timedelta as td
+        jst = timezone(td(hours=9))
+        now_jst = datetime.now(jst)
+        
+        subject = f"【PubMed新着論文】{field_name} - {now_jst.strftime('%Y年%m月%d日')}"
         
         # メール本文の構築
         body = f"""新着論文AI要約配信 {field_name}
+配信日時：{now_jst.strftime('%Y年%m月%d日 %H時%M分')}
 
 本日の新着論文は{len(articles)}件です。
 
 """
-        for i, article in enumerate(articles, 1):
+        # 最新の論文から表示（最大20件）
+        for i, article in enumerate(articles[:20], 1):
             body += f"""[論文{i}]
 原題：{article['title']}
 著者：{article['authors']}
@@ -190,10 +282,13 @@ PubMed：{article['url']}
 DOI：https://doi.org/{article['doi']} (DOI: {article['doi']})
 
 要約（AI生成）：
-{chr(10).join(article['summary'])}
+{chr(10).join(article.get('summary', ['要約なし']))}
 
 ---
 """
+        
+        if len(articles) > 20:
+            body += f"\n※ 他{len(articles)-20}件の論文があります。PubMedで直接ご確認ください。\n"
         
         # メール送信
         msg = MIMEMultipart()
@@ -226,8 +321,12 @@ def main():
         "Radiotherapy and Oncology",
         "Journal of Radiation Research",
         "Radiation Oncology",
-        "Clinical and Translational Radiation Oncology"
+        "Clinical and Translational Radiation Oncology",
+        "Practical Radiation Oncology",
+        "Advances in Radiation Oncology"
     ]
+    
+    print("=== PubMed論文収集開始 ===")
     
     # 1. PubMedから新着論文を取得
     fetcher = PubMedFetcher(JOURNAL_NAMES)
@@ -235,27 +334,38 @@ def main():
     
     if not pmid_list:
         print("新着論文はありません")
+        # 新着なしでもメール通知
+        sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        sender.send_summary(TO_EMAIL, [], "放射線腫瘍学")
         return
     
-    print(f"{len(pmid_list)}件の新着論文を発見")
+    print(f"\n{len(pmid_list)}件の論文IDを取得")
     
     # 2. 論文詳細を取得
     articles = fetcher.fetch_article_details(pmid_list)
+    print(f"\n{len(articles)}件の論文詳細を取得完了")
     
     # 3. AI要約を生成
-    summarizer = AIReporter(GEMINI_API_KEY)
-    for article in articles:
-        time.sleep(1)  # API制限対策
-        article['summary'] = summarizer.summarize_abstract(
-            article['abstract'], 
-            article['title']
-        )
+    if articles:
+        print("\n=== AI要約生成開始 ===")
+        summarizer = AIReporter(GEMINI_API_KEY)
+        
+        for idx, article in enumerate(articles, 1):
+            print(f"要約中 ({idx}/{len(articles)}): {article['title'][:50]}...")
+            time.sleep(1)  # API制限対策
+            article['summary'] = summarizer.summarize_abstract(
+                article['abstract'], 
+                article['title']
+            )
     
     # 4. メール送信
     if articles:
+        print("\n=== メール送信 ===")
         sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        sender.send_summary(TO_EMAIL, articles)
-        print(f"要約メールを送信しました: {len(articles)}件")
+        sender.send_summary(TO_EMAIL, articles, "放射線腫瘍学")
+        print(f"✅ 要約メールを送信しました: {len(articles)}件")
+    
+    print("\n=== 処理完了 ===")
 
 if __name__ == "__main__":
     main()
