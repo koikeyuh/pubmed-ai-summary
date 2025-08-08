@@ -5,25 +5,132 @@ import requests
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import List, Dict
+from typing import List, Dict, Set
 import google.generativeai as genai
 import time
 import xml.etree.ElementTree as ET
 import re
 
+# 雑誌名の略称辞書
+JOURNAL_ABBREVIATIONS = {
+    "International Journal of Radiation Oncology Biology Physics": "Int J Radiat Oncol Biol Phys",
+    "Radiotherapy and Oncology": "Radiother Oncol",
+    "Journal of Radiation Research": "J Radiat Res",
+    "Radiation Oncology": "Radiat Oncol",
+    "Clinical and Translational Radiation Oncology": "Clin Transl Radiat Oncol",
+    "Practical Radiation Oncology": "Pract Radiat Oncol",
+    "Advances in Radiation Oncology": "Adv Radiat Oncol",
+    "International Journal of Radiation Biology": "Int J Radiat Biol",
+    "Radiation Research": "Radiat Res",
+    "Medical Physics": "Med Phys",
+    "Physics in Medicine and Biology": "Phys Med Biol",
+    "Strahlentherapie und Onkologie": "Strahlenther Onkol",
+    "Journal of Applied Clinical Medical Physics": "J Appl Clin Med Phys",
+    "Cancer/Radiotherapie": "Cancer Radiother",
+    "Seminars in Radiation Oncology": "Semin Radiat Oncol",
+    "Brachytherapy": "Brachytherapy",
+    "Reports of Practical Oncology and Radiotherapy": "Rep Pract Oncol Radiother",
+    "Journal of Radiation Oncology": "J Radiat Oncol",
+    "Radiation and Environmental Biophysics": "Radiat Environ Biophys",
+    "Radiation Protection Dosimetry": "Radiat Prot Dosimetry"
+}
+
+def get_journal_abbreviation(journal_name: str) -> str:
+    """雑誌名を略称に変換"""
+    if journal_name in JOURNAL_ABBREVIATIONS:
+        return JOURNAL_ABBREVIATIONS[journal_name]
+    
+    for full_name, abbrev in JOURNAL_ABBREVIATIONS.items():
+        if full_name.lower() in journal_name.lower():
+            return abbrev
+    
+    return journal_name
+
+class HistoryManager:
+    """送信履歴を管理するクラス"""
+    
+    def __init__(self, history_file: str = "sent_articles_history.json"):
+        self.history_file = history_file
+        self.sent_pmids = self.load_history()
+    
+    def load_history(self) -> Set[str]:
+        """履歴ファイルから送信済みPMIDを読み込み"""
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r') as f:
+                    data = json.load(f)
+                    # 古いエントリを削除（90日以上前）
+                    cutoff_date = (datetime.now() - timedelta(days=90)).isoformat()
+                    filtered_data = {
+                        pmid: date for pmid, date in data.items()
+                        if date > cutoff_date
+                    }
+                    return set(filtered_data.keys())
+            except Exception as e:
+                print(f"履歴ファイル読み込みエラー: {e}")
+                return set()
+        return set()
+    
+    def is_sent(self, pmid: str) -> bool:
+        """PMIDが送信済みかチェック"""
+        return pmid in self.sent_pmids
+    
+    def add_sent_articles(self, pmids: List[str]):
+        """送信済みPMIDを追加"""
+        current_date = datetime.now().isoformat()
+        
+        # 既存の履歴を読み込み
+        history_data = {}
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r') as f:
+                    history_data = json.load(f)
+            except:
+                pass
+        
+        # 新しいPMIDを追加
+        for pmid in pmids:
+            history_data[pmid] = current_date
+            self.sent_pmids.add(pmid)
+        
+        # 90日以上前のエントリを削除
+        cutoff_date = (datetime.now() - timedelta(days=90)).isoformat()
+        history_data = {
+            pmid: date for pmid, date in history_data.items()
+            if date > cutoff_date
+        }
+        
+        # ファイルに保存
+        with open(self.history_file, 'w') as f:
+            json.dump(history_data, f, indent=2)
+        
+        print(f"履歴を更新: {len(pmids)}件のPMIDを記録")
+    
+    def get_stats(self) -> Dict:
+        """統計情報を取得"""
+        if os.path.exists(self.history_file):
+            with open(self.history_file, 'r') as f:
+                data = json.load(f)
+                return {
+                    "total_sent": len(data),
+                    "oldest_date": min(data.values()) if data else None,
+                    "newest_date": max(data.values()) if data else None
+                }
+        return {"total_sent": 0, "oldest_date": None, "newest_date": None}
+
 class PubMedFetcher:
     """PubMed APIを使用して論文を取得"""
     
-    def __init__(self, journal_names: List[str]):
+    def __init__(self, journal_names: List[str], history_manager: HistoryManager = None):
         self.base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
         self.journal_names = journal_names
+        self.history_manager = history_manager
         
     def search_articles(self, days_back: int = 1) -> List[str]:
         """指定日数以内の論文IDを取得"""
         date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y/%m/%d")
         date_to = datetime.now().strftime("%Y/%m/%d")
         
-        # 雑誌名でクエリを構築
         journal_query = " OR ".join([f'"{journal}"[Journal]' for journal in self.journal_names])
         query = f"({journal_query}) AND {date_from}:{date_to}[PDAT]"
         
@@ -33,7 +140,7 @@ class PubMedFetcher:
         params = {
             "db": "pubmed",
             "term": query,
-            "retmax": 100,  # 最大100件に増やす
+            "retmax": 100,
             "retmode": "json",
             "sort": "pub_date"
         }
@@ -41,11 +148,21 @@ class PubMedFetcher:
         response = requests.get(f"{self.base_url}esearch.fcgi", params=params)
         data = response.json()
         
-        pmid_list = data.get("esearchresult", {}).get("idlist", [])
-        print(f"見つかった論文数: {len(pmid_list)}件")
-        print(f"PMID リスト: {pmid_list[:10]}...")  # 最初の10件を表示
+        all_pmids = data.get("esearchresult", {}).get("idlist", [])
         
-        return pmid_list
+        # 履歴フィルタリング
+        if self.history_manager:
+            new_pmids = [pmid for pmid in all_pmids if not self.history_manager.is_sent(pmid)]
+            filtered_count = len(all_pmids) - len(new_pmids)
+            
+            print(f"見つかった論文数: {len(all_pmids)}件")
+            print(f"既送信でスキップ: {filtered_count}件")
+            print(f"新規論文数: {len(new_pmids)}件")
+            
+            return new_pmids
+        else:
+            print(f"見つかった論文数: {len(all_pmids)}件")
+            return all_pmids
     
     def fetch_article_details(self, pmid_list: List[str]) -> List[Dict]:
         """論文の詳細情報を取得"""
@@ -53,9 +170,8 @@ class PubMedFetcher:
             return []
         
         articles = []
-        
-        # PMIDを一度に最大20件ずつ処理
         batch_size = 20
+        
         for i in range(0, len(pmid_list), batch_size):
             batch = pmid_list[i:i+batch_size]
             print(f"バッチ {i//batch_size + 1}: {len(batch)}件の論文を取得中...")
@@ -68,11 +184,9 @@ class PubMedFetcher:
             
             response = requests.get(f"{self.base_url}efetch.fcgi", params=params)
             
-            # XMLパース
             try:
                 root = ET.fromstring(response.content)
                 
-                # 各PubmedArticleを処理
                 for article_elem in root.findall('.//PubmedArticle'):
                     article_data = self._parse_article_element(article_elem)
                     if article_data:
@@ -83,52 +197,47 @@ class PubMedFetcher:
                 print(f"XMLパースエラー: {e}")
                 continue
             
-            # API制限対策
             if i + batch_size < len(pmid_list):
                 time.sleep(0.5)
         
-        # 重複を除去（PMIDでユニーク化）
+        # 重複を除去
         unique_articles = {}
         for article in articles:
             if article['pmid'] not in unique_articles:
                 unique_articles[article['pmid']] = article
         
         final_articles = list(unique_articles.values())
-        print(f"最終的な論文数: {len(final_articles)}件（重複除去後）")
+        print(f"最終的な論文数: {len(final_articles)}件")
         
         return final_articles
     
     def _parse_article_element(self, article_elem) -> Dict:
         """XML要素から論文情報を抽出"""
         try:
-            # PMID取得
             pmid_elem = article_elem.find('.//PMID')
             if pmid_elem is None:
                 return None
             pmid = pmid_elem.text
             
-            # タイトル取得
             title_elem = article_elem.find('.//ArticleTitle')
             title = title_elem.text if title_elem is not None else "タイトルなし"
             
-            # アブストラクト取得
             abstract_texts = []
             abstract_elems = article_elem.findall('.//AbstractText')
             for abs_elem in abstract_elems:
                 if abs_elem.text:
                     abstract_texts.append(abs_elem.text)
-                # Labelがある場合（構造化アブストラクト）
                 if 'Label' in abs_elem.attrib:
                     label = abs_elem.attrib['Label']
                     text = abs_elem.text or ""
                     abstract_texts.append(f"{label}: {text}")
             abstract = " ".join(abstract_texts)
             
-            # 雑誌名取得
+            # 雑誌名を略称に変換
             journal_elem = article_elem.find('.//Journal/Title')
-            journal = journal_elem.text if journal_elem is not None else "雑誌名不明"
+            journal_full = journal_elem.text if journal_elem is not None else "雑誌名不明"
+            journal = get_journal_abbreviation(journal_full)
             
-            # 著者名取得（最大3名）
             authors = []
             author_elems = article_elem.findall('.//Author')
             for author_elem in author_elems[:3]:
@@ -141,10 +250,8 @@ class PubMedFetcher:
                 authors.append("et al.")
             author_str = ", ".join(authors) if authors else "著者不明"
             
-            # 発行日取得
             pub_date = self._extract_pub_date(article_elem)
             
-            # DOI取得
             doi = ""
             for id_elem in article_elem.findall('.//ArticleId'):
                 if id_elem.get('IdType') == 'doi':
@@ -168,7 +275,6 @@ class PubMedFetcher:
     
     def _extract_pub_date(self, article_elem) -> str:
         """発行日を抽出"""
-        # PubDateを優先的に使用
         pubdate = article_elem.find('.//PubDate')
         if pubdate is not None:
             year = pubdate.find('Year')
@@ -179,7 +285,6 @@ class PubMedFetcher:
             month_str = month.text if month is not None else "01"
             day_str = day.text if day is not None else "01"
             
-            # 月名を数字に変換
             month_map = {
                 'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
                 'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
@@ -210,13 +315,12 @@ class AIReporter:
             ]
         
         prompt = f"""
-        以下の医学論文のアブストラクトを読んで、最も重要なポイントを日本語で4点に要約してください。
-        各ポイントは簡潔に、専門用語は適切に日本語訳してください。
+        以下の医学論文のアブストラクトを読んで、放射線腫瘍学の専門家向けに、重要なポイントを日本語で4つの箇条書きで日本語に要約してください。
         
         論文タイトル: {title}
         
         アブストラクト:
-        {abstract[:3000]}  # 文字数制限
+        {abstract[:3000]}
         
         出力形式（必ず以下の形式で4点出力）:
         ・[ポイント1]
@@ -227,14 +331,12 @@ class AIReporter:
         
         try:
             response = self.model.generate_content(prompt)
-            # 箇条書きを抽出
             lines = response.text.strip().split('\n')
             points = [line.strip() for line in lines if line.strip().startswith('・')]
             
             if len(points) >= 4:
                 return points[:4]
             else:
-                # 不足分を補完
                 while len(points) < 4:
                     points.append("・詳細はアブストラクトを参照してください")
                 return points[:4]
@@ -255,25 +357,31 @@ class EmailSender:
         self.gmail_address = gmail_address
         self.app_password = app_password
     
-    def send_summary(self, to_email: str, articles: List[Dict], field_name: str = "放射線腫瘍学"):
+    def send_summary(self, to_email: str, articles: List[Dict], stats: Dict = None, field_name: str = "放射線腫瘍学"):
         """要約メールを送信"""
-        # 日本時間で表示
         from datetime import timezone, timedelta as td
         jst = timezone(td(hours=9))
         now_jst = datetime.now(jst)
         
         subject = f"【PubMed新着論文】{field_name} - {now_jst.strftime('%Y年%m月%d日')}"
         
-        # メール本文の構築
         body = f"""新着論文AI要約配信 {field_name}
 配信日時：{now_jst.strftime('%Y年%m月%d日 %H時%M分')}
 
 本日の新着論文は{len(articles)}件です。
-
 """
-        # 最新の論文から表示（最大20件）
-        for i, article in enumerate(articles[:20], 1):
-            body += f"""[論文{i}]
+        
+        # 統計情報を追加
+        if stats:
+            body += f"（累計送信論文数：{stats['total_sent']}件）\n"
+        
+        body += "\n"
+        
+        if len(articles) == 0:
+            body += "本日配信する新着論文はありません。\n"
+        else:
+            for i, article in enumerate(articles[:20], 1):
+                body += f"""[論文{i}]
 原題：{article['title']}
 著者：{article['authors']}
 雑誌名：{article['journal']}
@@ -286,11 +394,10 @@ DOI：https://doi.org/{article['doi']} (DOI: {article['doi']})
 
 ---
 """
+            
+            if len(articles) > 20:
+                body += f"\n※ 他{len(articles)-20}件の論文があります。PubMedで直接ご確認ください。\n"
         
-        if len(articles) > 20:
-            body += f"\n※ 他{len(articles)-20}件の論文があります。PubMedで直接ご確認ください。\n"
-        
-        # メール送信
         msg = MIMEMultipart()
         msg['From'] = self.gmail_address
         msg['To'] = to_email
@@ -309,13 +416,11 @@ DOI：https://doi.org/{article['doi']} (DOI: {article['doi']})
 
 def main():
     """メイン処理"""
-    # 環境変数から設定を取得
     GMAIL_ADDRESS = os.environ.get('GMAIL_ADDRESS')
     GMAIL_APP_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
     GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
     TO_EMAIL = os.environ.get('TO_EMAIL')
     
-    # 監視する雑誌名（放射線腫瘍学の主要誌）
     JOURNAL_NAMES = [
         "International Journal of Radiation Oncology Biology Physics",
         "Radiotherapy and Oncology",
@@ -328,18 +433,22 @@ def main():
     
     print("=== PubMed論文収集開始 ===")
     
-    # 1. PubMedから新着論文を取得
-    fetcher = PubMedFetcher(JOURNAL_NAMES)
-    pmid_list = fetcher.search_articles(days_back=7)  # 過去7日分
+    # 履歴マネージャーを初期化
+    history_manager = HistoryManager()
+    stats = history_manager.get_stats()
+    print(f"送信履歴: 累計{stats['total_sent']}件の論文を送信済み")
+    
+    # 1. PubMedから新着論文を取得（履歴フィルタリング付き）
+    fetcher = PubMedFetcher(JOURNAL_NAMES, history_manager)
+    pmid_list = fetcher.search_articles(days_back=7)
     
     if not pmid_list:
-        print("新着論文はありません")
-        # 新着なしでもメール通知
+        print("新規論文はありません（すべて送信済みまたは新着なし）")
         sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        sender.send_summary(TO_EMAIL, [], "放射線腫瘍学")
+        sender.send_summary(TO_EMAIL, [], stats, "放射線腫瘍学")
         return
     
-    print(f"\n{len(pmid_list)}件の論文IDを取得")
+    print(f"\n{len(pmid_list)}件の新規論文を処理")
     
     # 2. 論文詳細を取得
     articles = fetcher.fetch_article_details(pmid_list)
@@ -352,18 +461,22 @@ def main():
         
         for idx, article in enumerate(articles, 1):
             print(f"要約中 ({idx}/{len(articles)}): {article['title'][:50]}...")
-            time.sleep(1)  # API制限対策
+            time.sleep(1)
             article['summary'] = summarizer.summarize_abstract(
                 article['abstract'], 
                 article['title']
             )
     
     # 4. メール送信
+    print("\n=== メール送信 ===")
+    sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+    sender.send_summary(TO_EMAIL, articles, stats, "放射線腫瘍学")
+    
+    # 5. 送信履歴を更新
     if articles:
-        print("\n=== メール送信 ===")
-        sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        sender.send_summary(TO_EMAIL, articles, "放射線腫瘍学")
-        print(f"✅ 要約メールを送信しました: {len(articles)}件")
+        sent_pmids = [article['pmid'] for article in articles]
+        history_manager.add_sent_articles(sent_pmids)
+        print(f"✅ {len(articles)}件の論文を送信し、履歴を更新しました")
     
     print("\n=== 処理完了 ===")
 
