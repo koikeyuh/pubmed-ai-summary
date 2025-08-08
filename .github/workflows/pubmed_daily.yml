@@ -27,7 +27,8 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install -r requirements.txt
+        pip install requests
+        pip install google-generativeai
     
     - name: Run PubMed fetcher and send email
       env:
