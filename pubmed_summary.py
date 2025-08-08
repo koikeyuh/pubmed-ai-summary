@@ -231,7 +231,7 @@ def main():
     
     # 1. PubMedから新着論文を取得
     fetcher = PubMedFetcher(JOURNAL_NAMES)
-    pmid_list = fetcher.search_articles(days_back=1)  # 過去7日分
+    pmid_list = fetcher.search_articles(days_back=7)  # 過去7日分
     
     if not pmid_list:
         print("新着論文はありません")
