@@ -2,9 +2,12 @@ name: Daily PubMed Summary
 
 on:
   schedule:
-    # 毎日朝14時（JST）に実行
+    # 毎日14時（JST）に実行
     - cron: '0 5 * * *'  # UTC 5:00 = JST 14:00
   workflow_dispatch:  # 手動実行も可能
+
+permissions:
+  contents: write  # これが無いと push できない
 
 jobs:
   fetch-and-summarize:
@@ -13,6 +16,9 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
     
     - name: Setup Python
       uses: actions/setup-python@v4
@@ -21,8 +27,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install requests
-        pip install google-generativeai
+        pip install -r requirements.txt
     
     - name: Run PubMed fetcher and send email
       env:
@@ -32,3 +37,11 @@ jobs:
         TO_EMAIL: ${{ secrets.TO_EMAIL }}
       run: |
         python pubmed_summary.py
+    
+    - name: Commit history updates
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add sent_articles_history.json
+        git diff --staged --quiet || git commit -m "Update sent articles history [skip ci]"
+        git push
