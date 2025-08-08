@@ -438,15 +438,21 @@ def main():
     stats = history_manager.get_stats()
     print(f"送信履歴: 累計{stats['total_sent']}件の論文を送信済み")
     
+    # 履歴ファイルが存在しない場合は空のファイルを作成
+    if not os.path.exists("sent_articles_history.json"):
+        with open("sent_articles_history.json", 'w') as f:
+            json.dump({}, f)
+        print("履歴ファイルを初期化しました")
+    
     # 1. PubMedから新着論文を取得（履歴フィルタリング付き）
     fetcher = PubMedFetcher(JOURNAL_NAMES, history_manager)
-    pmid_list = fetcher.search_articles(days_back=4)
+    pmid_list = fetcher.search_articles(days_back=7)
     
     if not pmid_list:
         print("新規論文はありません（すべて送信済みまたは新着なし）")
         sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
         sender.send_summary(TO_EMAIL, [], stats, "放射線腫瘍学")
-        return
+        return  # ここで終了（履歴更新なし）
     
     print(f"\n{len(pmid_list)}件の新規論文を処理")
     
@@ -472,7 +478,7 @@ def main():
     sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
     sender.send_summary(TO_EMAIL, articles, stats, "放射線腫瘍学")
     
-    # 5. 送信履歴を更新
+    # 5. 送信履歴を更新（articlesが空でも履歴ファイルは更新）
     if articles:
         sent_pmids = [article['pmid'] for article in articles]
         history_manager.add_sent_articles(sent_pmids)
