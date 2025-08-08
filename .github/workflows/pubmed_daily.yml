@@ -43,6 +43,17 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add sent_articles_history.json
-        git diff --staged --quiet || git commit -m "Update sent articles history [skip ci]"
-        git push
+        
+        # ファイルが存在する場合のみ処理
+        if [ -f sent_articles_history.json ]; then
+          git add sent_articles_history.json
+          # 変更がある場合のみコミット
+          if ! git diff --staged --quiet; then
+            git commit -m "Update sent articles history [skip ci]"
+            git push
+          else
+            echo "No changes to commit"
+          fi
+        else
+          echo "History file does not exist (no new articles)"
+        fi
