@@ -1,0 +1,34 @@
+name: Daily PubMed Summary
+
+on:
+  schedule:
+    # 毎日朝14時（JST）に実行
+    - cron: '0 5 * * *'  # UTC 5:00 = JST 14:00
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  fetch-and-summarize:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install requests
+        pip install google-generativeai
+    
+    - name: Run PubMed fetcher and send email
+      env:
+        GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        TO_EMAIL: ${{ secrets.TO_EMAIL }}
+      run: |
+        python pubmed_summary.py
