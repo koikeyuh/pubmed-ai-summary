@@ -13,13 +13,16 @@ import re
 
 # 雑誌名の略称辞書
 JOURNAL_ABBREVIATIONS = {
+    "The Lancet Oncology": "Lancet Oncol",
     "International Journal of Radiation Oncology Biology Physics": "Int J Radiat Oncol Biol Phys",
-    "Radiotherapy and Oncology": "Radiother Oncol",
-    "Journal of Radiation Research": "J Radiat Res",
-    "Radiation Oncology": "Radiat Oncol",
-    "Clinical and Translational Radiation Oncology": "Clin Transl Radiat Oncol",
-    "Practical Radiation Oncology": "Pract Radiat Oncol",
     "Advances in Radiation Oncology": "Adv Radiat Oncol",
+    "Clinical and Translational Radiation Oncology": "Clin Transl Radiat Oncol",
+    "Radiotherapy and Oncology": "Radiother Oncol",
+    "Journal of Clinical Oncology": "J Clin Oncol",
+    "Radiation Oncology": "Radiat Oncol",
+    # 以下は念のため残しておく（他の雑誌が検索結果に含まれた場合用）
+    "Journal of Radiation Research": "J Radiat Res",
+    "Practical Radiation Oncology": "Pract Radiat Oncol",
     "International Journal of Radiation Biology": "Int J Radiat Biol",
     "Radiation Research": "Radiat Res",
     "Medical Physics": "Med Phys",
@@ -28,11 +31,7 @@ JOURNAL_ABBREVIATIONS = {
     "Journal of Applied Clinical Medical Physics": "J Appl Clin Med Phys",
     "Cancer/Radiotherapie": "Cancer Radiother",
     "Seminars in Radiation Oncology": "Semin Radiat Oncol",
-    "Brachytherapy": "Brachytherapy",
-    "Reports of Practical Oncology and Radiotherapy": "Rep Pract Oncol Radiother",
-    "Journal of Radiation Oncology": "J Radiat Oncol",
-    "Radiation and Environmental Biophysics": "Radiat Environ Biophys",
-    "Radiation Protection Dosimetry": "Radiat Prot Dosimetry"
+    "Brachytherapy": "Brachytherapy"
 }
 
 def get_journal_abbreviation(journal_name: str) -> str:
@@ -422,13 +421,13 @@ def main():
     TO_EMAIL = os.environ.get('TO_EMAIL')
     
     JOURNAL_NAMES = [
-        "International Journal of Radiation Oncology Biology Physics",
-        "Radiotherapy and Oncology",
-        "Journal of Radiation Research",
-        "Radiation Oncology",
-        "Clinical and Translational Radiation Oncology",
-        "Practical Radiation Oncology",
-        "Advances in Radiation Oncology"
+        "The Lancet Oncology",                                      # Lancet Oncol
+        "International Journal of Radiation Oncology Biology Physics",  # Int J Radiat Oncol Biol Phys
+        "Advances in Radiation Oncology",                           # Adv Radiat Oncol
+        "Clinical and Translational Radiation Oncology",            # Clin Transl Radiat Oncol
+        "Radiotherapy and Oncology",                                # Radiother Oncol
+        "Journal of Clinical Oncology",                             # J Clin Oncol
+        "Radiation Oncology"                                        # Radiat Oncol
     ]
     
     print("=== PubMed論文収集開始 ===")
