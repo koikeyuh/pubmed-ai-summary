@@ -317,6 +317,150 @@ class AIReporter:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('gemini-1.5-flash')
     
+    def summarize_with_japanese_title(self, abstract: str, title: str) -> Dict[str, any]:
+        """タイトルの日本語訳とアブストラクトの要約を生成"""
+        
+        # アブストラクトがない場合
+        if not abstract or len(abstract) < 50:
+            return {
+                "title_ja": self._translate_title_only(title),
+                "summary": [
+                    "・この論文のアブストラクトは未登録です",
+                    "・PubMedで要約が利用できません", 
+                    "・論文本文の確認が必要です",
+                    "・出版社サイトで詳細をご確認ください"
+                ]
+            }
+        
+        # プロンプト（タイトル翻訳と要約を同時に依頼）
+        prompt = f"""
+        以下の医学論文について、タイトルの日本語訳と、アブストラクトの重要ポイント4点を作成してください。
+
+        【出力形式】
+        必ず以下のJSON形式で出力してください：
+        {{
+            "title_ja": "タイトルの日本語訳",
+            "bullets": [
+                "ポイント1",
+                "ポイント2", 
+                "ポイント3",
+                "ポイント4"
+            ]
+        }}
+
+        【タイトル翻訳のルール】
+        - 簡潔で正確な日本語訳
+        - 専門用語は適切に日本語化
+        - 略語（SBRT, IMRT等）はそのまま残す
+        - 40-60文字程度に収める
+
+        【要約のルール】
+        - 各ポイントは50-100文字程度
+        - アブストラクトの内容のみを要約
+        - 推測や一般論は書かない
+        - 専門用語は適切に日本語訳
+
+        英語タイトル:
+        {title}
+
+        アブストラクト:
+        {abstract[:3000]}
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            text = response.text.strip()
+            
+            # JSONを抽出してパース
+            import json
+            # ```json ... ``` の形式を処理
+            text = re.sub(r'```json\s*', '', text)
+            text = re.sub(r'```\s*$', '', text)
+            
+            # JSONパース
+            try:
+                data = json.loads(text)
+                title_ja = data.get("title_ja", "")
+                bullets = data.get("bullets", [])
+            except json.JSONDecodeError:
+                # JSON形式でない場合はフォールバック
+                print(f"JSON解析エラー、フォールバック処理")
+                title_ja = self._translate_title_only(title)
+                bullets = self._extract_bullets_from_text(text)
+            
+            # 要約の整形
+            formatted_bullets = []
+            for bullet in bullets[:4]:
+                # 先頭に「・」を追加
+                bullet = str(bullet).strip()
+                if not bullet.startswith('・'):
+                    bullet = '・' + bullet
+                # 長さ制限
+                if len(bullet) > 150:
+                    bullet = bullet[:147] + '...'
+                formatted_bullets.append(bullet)
+            
+            # 4点に満たない場合は補完
+            while len(formatted_bullets) < 4:
+                formatted_bullets.append("・詳細は原文を参照")
+            
+            return {
+                "title_ja": title_ja or "（翻訳失敗）",
+                "summary": formatted_bullets[:4]
+            }
+            
+        except Exception as e:
+            print(f"AI処理エラー ({title[:30]}...): {e}")
+            
+            # エラー時のフォールバック
+            return {
+                "title_ja": self._translate_title_only(title),
+                "summary": [
+                    "・AI要約の生成に失敗しました",
+                    "・原文をご確認ください",
+                    "・一時的なエラーの可能性があります",
+                    "・PubMedリンクから詳細確認可能"
+                ]
+            }
+    
+    def _translate_title_only(self, title: str) -> str:
+        """タイトルのみを翻訳（フォールバック用）"""
+        try:
+            prompt = f"""
+            以下の医学論文タイトルを日本語に翻訳してください。
+            簡潔で正確な翻訳を心がけ、40-60文字程度に収めてください。
+            略語（SBRT, IMRT, PET等）はそのまま残してください。
+            
+            英語タイトル: {title}
+            
+            日本語訳：
+            """
+            
+            response = self.model.generate_content(prompt)
+            translated = response.text.strip()
+            # 余分な記号を削除
+            translated = translated.replace('"', '').replace('「', '').replace('」', '')
+            return translated[:80] if translated else "（翻訳失敗）"
+        except:
+            return "（翻訳失敗）"
+    
+    def _extract_bullets_from_text(self, text: str) -> List[str]:
+        """テキストから箇条書きを抽出（フォールバック用）"""
+        lines = text.split('\n')
+        bullets = []
+        for line in lines:
+            line = line.strip()
+            if line.startswith('・') or line.startswith('-') or line.startswith('*'):
+                bullets.append(line)
+        return bullets if bullets else ["・要約を抽出できませんでした"]
+
+class AIReporter_:
+    """Google Gemini APIを使用してAI要約を生成"""
+    
+    def __init__(self, api_key: str):
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
+    
     def summarize_abstract(self, abstract: str, title: str) -> List[str]:
         """アブストラクトを日本語で要約"""
         if not abstract or len(abstract) < 50:
@@ -384,6 +528,70 @@ class EmailSender:
 本日の新着論文は{len(articles)}件です。
 """
         
+        if stats:
+            body += f"（累計送信論文数：{stats['total_sent']}件）\n"
+        
+        body += "\n"
+        
+        if len(articles) == 0:
+            body += "本日配信する新着論文はありません。\n"
+        else:
+            for i, article in enumerate(articles[:20], 1):
+                body += f"""[論文{i}]
+原題：{article['title']}
+邦題：{article.get('title_ja', '（翻訳未実施）')}
+著者：{article['authors']}
+雑誌名：{article['journal']}
+発行日：{article['pub_date']}
+PubMed：{article['url']}
+DOI：https://doi.org/{article['doi']} (DOI: {article['doi']})
+
+要約（AI生成）：
+{chr(10).join(article.get('summary', ['要約なし']))}
+
+---
+"""
+            
+            if len(articles) > 20:
+                body += f"\n※ 他{len(articles)-20}件の論文があります。PubMedで直接ご確認ください。\n"
+        
+        msg = MIMEMultipart()
+        msg['From'] = self.gmail_address
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        try:
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                server.starttls()
+                server.login(self.gmail_address, self.app_password)
+                server.send_message(msg)
+            print(f"メール送信成功: {to_email}")
+        except Exception as e:
+            print(f"メール送信エラー: {e}")
+            raise
+
+class EmailSender_:
+    """Gmail SMTPを使用してメール送信"""
+    
+    def __init__(self, gmail_address: str, app_password: str):
+        self.gmail_address = gmail_address
+        self.app_password = app_password
+    
+    def send_summary(self, to_email: str, articles: List[Dict], stats: Dict = None, field_name: str = "放射線腫瘍学"):
+        """要約メールを送信"""
+        from datetime import timezone, timedelta as td
+        jst = timezone(td(hours=9))
+        now_jst = datetime.now(jst)
+        
+        subject = f"【PubMed新着論文】{field_name} - {now_jst.strftime('%Y年%m月%d日')}"
+        
+        body = f"""新着論文AI要約配信 {field_name}
+配信日時：{now_jst.strftime('%Y年%m月%d日 %H時%M分')}
+
+本日の新着論文は{len(articles)}件です。
+"""
+        
         # 統計情報を追加
         #if stats:
         #    body += f"（累計送信論文数：{stats['total_sent']}件）\n"
@@ -428,6 +636,93 @@ DOI：https://doi.org/{article['doi']} (DOI: {article['doi']})
             raise
 
 def main():
+    """メイン処理"""
+    GMAIL_ADDRESS = os.environ.get('GMAIL_ADDRESS')
+    GMAIL_APP_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
+    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+    TO_EMAIL = os.environ.get('TO_EMAIL')
+    
+    # 雑誌名（略称）
+    JOURNAL_NAMES = [
+        "Lancet Oncol",
+        "Int J Radiat Oncol Biol Phys",
+        "Adv Radiat Oncol",
+        "Clin Transl Radiat Oncol",
+        "Radiother Oncol",
+        "J Clin Oncol",
+        "Radiat Oncol"
+    ]
+    
+    print("=== PubMed論文収集開始 ===")
+    
+    # 履歴マネージャーを初期化
+    history_manager = HistoryManager()
+    stats = history_manager.get_stats()
+    print(f"送信履歴: 累計{stats['total_sent']}件の論文を送信済み")
+    
+    # 履歴ファイルが存在しない場合は作成
+    if not os.path.exists("sent_articles_history.json"):
+        with open("sent_articles_history.json", 'w') as f:
+            json.dump({}, f)
+        print("履歴ファイルを初期化しました")
+    
+    # 1. PubMedから新着論文を取得
+    fetcher = PubMedFetcher(JOURNAL_NAMES, history_manager)
+    pmid_list = fetcher.search_articles(days_back=2)
+    
+    # API制限対策
+    MAX_ARTICLES_PER_DAY = 40
+    if len(pmid_list) > MAX_ARTICLES_PER_DAY:
+        print(f"⚠️ API制限のため、{len(pmid_list)}件中{MAX_ARTICLES_PER_DAY}件のみ処理します")
+        pmid_list = pmid_list[:MAX_ARTICLES_PER_DAY]
+    
+    if not pmid_list:
+        print("新規論文はありません")
+        sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        sender.send_summary(TO_EMAIL, [], stats, "放射線腫瘍学")
+        return
+    
+    print(f"\n{len(pmid_list)}件の新規論文を処理")
+    
+    # 2. 論文詳細を取得
+    articles = fetcher.fetch_article_details(pmid_list)
+    print(f"\n{len(articles)}件の論文詳細を取得完了")
+    
+    # 3. AI要約と日本語タイトルを生成
+    if articles:
+        print("\n=== AI要約・翻訳生成開始 ===")
+        summarizer = AIReporter(GEMINI_API_KEY)
+        
+        for idx, article in enumerate(articles, 1):
+            print(f"処理中 ({idx}/{len(articles)}): {article['title'][:50]}...")
+            
+            # タイトル翻訳と要約を同時に取得
+            time.sleep(1)  # API制限対策
+            result = summarizer.summarize_with_japanese_title(
+                article.get('abstract', ''), 
+                article['title']
+            )
+            
+            # 結果を記事に追加
+            article['title_ja'] = result['title_ja']
+            article['summary'] = result['summary']
+            
+            print(f"  → 邦題: {article['title_ja'][:40]}...")
+    
+    # 4. メール送信
+    print("\n=== メール送信 ===")
+    sender = EmailSender(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+    sender.send_summary(TO_EMAIL, articles, stats, "放射線腫瘍学")
+    
+    # 5. 送信履歴を更新
+    if articles:
+        sent_pmids = [article['pmid'] for article in articles]
+        history_manager.add_sent_articles(sent_pmids)
+        print(f"✅ {len(articles)}件の論文を送信し、履歴を更新しました")
+    
+    print("\n=== 処理完了 ===")
+
+def main_():
     """メイン処理"""
     GMAIL_ADDRESS = os.environ.get('GMAIL_ADDRESS')
     GMAIL_APP_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
