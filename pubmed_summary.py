@@ -126,28 +126,42 @@ class PubMedFetcher:
         self.history_manager = history_manager
         
     def search_articles(self, days_back: int = 1) -> List[str]:
-        """指定日数以内の論文IDを取得"""
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y/%m/%d")
-        date_to = datetime.now().strftime("%Y/%m/%d")
+        """指定日数以内の論文IDを取得（別プロジェクトの方式を採用）"""
         
-        journal_query = " OR ".join([f'"{journal}"[Journal]' for journal in self.journal_names])
-        query = f"({journal_query}) AND {date_from}:{date_to}[PDAT]"
+        # ⭐ 重要：[ta]フィールドを使用（略称でも検索可能）
+        journal_parts = [f'("{journal}"[ta])' for journal in self.journal_names]
+        journal_query = "(" + " OR ".join(journal_parts) + ")"
         
-        print(f"検索クエリ: {query}")
-        print(f"検索期間: {date_from} から {date_to}")
+        print(f"検索クエリ: {journal_query}")
+        print(f"直近{days_back}日間の論文を検索")
         
+        # ⭐ 重要：reldateとdatetypeを使用（別プロジェクトと同じ）
         params = {
             "db": "pubmed",
-            "term": query,
-            "retmax": 100,
+            "term": journal_query,
             "retmode": "json",
-            "sort": "pub_date"
+            "datetype": "edat",  # Entry Date（PubMed登録日）
+            "reldate": str(days_back),  # 直近N日
+            "retmax": 200,
+            "sort": "pub_date",
+            "tool": "pubmed-daily-digest",
+            "email": os.environ.get('GMAIL_ADDRESS', '')
         }
+        
+        # NCBIのAPIキーがあれば追加（オプション）
+        ncbi_api_key = os.environ.get('NCBI_API_KEY', '')
+        if ncbi_api_key:
+            params["api_key"] = ncbi_api_key
         
         response = requests.get(f"{self.base_url}esearch.fcgi", params=params)
         data = response.json()
         
-        all_pmids = data.get("esearchresult", {}).get("idlist", [])
+        # デバッグ情報
+        result = data.get("esearchresult", {})
+        count = result.get("count", "0")
+        all_pmids = result.get("idlist", [])
+        
+        print(f"検索結果: {count}件ヒット")
         
         # 履歴フィルタリング
         if self.history_manager:
@@ -371,8 +385,8 @@ class EmailSender:
 """
         
         # 統計情報を追加
-        if stats:
-            body += f"（累計送信論文数：{stats['total_sent']}件）\n"
+        #if stats:
+        #    body += f"（累計送信論文数：{stats['total_sent']}件）\n"
         
         body += "\n"
         
@@ -420,14 +434,15 @@ def main():
     GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
     TO_EMAIL = os.environ.get('TO_EMAIL')
     
+    # ⭐ 雑誌名を略称で指定（別プロジェクトと同じ方式）
     JOURNAL_NAMES = [
-        "The Lancet Oncology",                                      # Lancet Oncol
-        "International Journal of Radiation Oncology Biology Physics",  # Int J Radiat Oncol Biol Phys
-        "Advances in Radiation Oncology",                           # Adv Radiat Oncol
-        "Clinical and Translational Radiation Oncology",            # Clin Transl Radiat Oncol
-        "Radiotherapy and Oncology",                                # Radiother Oncol
-        "Journal of Clinical Oncology",                             # J Clin Oncol
-        "Radiation Oncology"                                        # Radiat Oncol
+        "Lancet Oncol",           # The Lancet Oncology
+        "Int J Radiat Oncol Biol Phys",  # International Journal of...
+        "Adv Radiat Oncol",       # Advances in Radiation Oncology
+        "Clin Transl Radiat Oncol",  # Clinical and Translational...
+        "Radiother Oncol",        # Radiotherapy and Oncology
+        "J Clin Oncol",           # Journal of Clinical Oncology
+        "Radiat Oncol"            # Radiation Oncology
     ]
     
     print("=== PubMed論文収集開始 ===")
@@ -437,15 +452,16 @@ def main():
     stats = history_manager.get_stats()
     print(f"送信履歴: 累計{stats['total_sent']}件の論文を送信済み")
     
-    # 履歴ファイルが存在しない場合は空のファイルを作成
-    if not os.path.exists("sent_articles_history.json"):
-        with open("sent_articles_history.json", 'w') as f:
-            json.dump({}, f)
-        print("履歴ファイルを初期化しました")
-    
-    # 1. PubMedから新着論文を取得（履歴フィルタリング付き）
+    # ⭐ 直近2日分を検索（別プロジェクトと同じ）
     fetcher = PubMedFetcher(JOURNAL_NAMES, history_manager)
-    pmid_list = fetcher.search_articles(days_back=2)
+    pmid_list = fetcher.search_articles(days_back=2)  # 2日分
+    
+    # API制限対策
+    MAX_ARTICLES_PER_DAY = 40
+    if len(pmid_list) > MAX_ARTICLES_PER_DAY:
+        print(f"⚠️ API制限のため、{len(pmid_list)}件中{MAX_ARTICLES_PER_DAY}件のみ処理します")
+        pmid_list = pmid_list[:MAX_ARTICLES_PER_DAY]
+    
     
     if not pmid_list:
         print("新規論文はありません（すべて送信済みまたは新着なし）")
